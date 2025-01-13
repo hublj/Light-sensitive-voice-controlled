@@ -1,0 +1,157 @@
+#include <STC8G.h>
+
+// 定义引脚 
+sbit InputPin = P5^4;  // 输入脚 P5.4 
+sbit OutputPin = P3^3; // 输出脚 P3.3 
+sbit DebounceInputPin = P5^5; // 防抖输入脚 P5.5
+sbit DebounceOutputPin = P3^2; // 防抖输出脚 P3.2
+
+// 定义时间常量（单位：毫秒）
+#define TIME_DURATION 60000 // 1分钟
+#define DEBOUNCE_TIME_COUNT 3000 // 30秒
+#define TIMER_INTERVAL 1      // 1ms定时周期
+
+// 状态枚举
+typedef enum {
+    IDLE,
+    DEBOUNCING,
+    TRIGGERED,
+    TIMEOUT
+} State;
+
+// 全局变量声明
+unsigned int timeCount = 0;       // 用于记录时间计数
+unsigned char lastInputState = 0; // 记录上次输入状态
+unsigned char debounceCurrentInputLevel = 0;
+State state = IDLE;               // 当前状态
+bit debounceStartTimer = 0;       // 防抖计时标志
+bit triggered = 0;                // 触发标志
+
+// 声明延时函数的原型
+void Delay(unsigned int ms);
+
+// GPIO初始化函数，配置引脚模式
+void GPIO_Init() {
+    // 将 P5.4 和 P5.5 配置为标准双向口输入模式 
+    P5M0 &= ~(0x10 | 0x20); 
+    P5M1 &= ~(0x10 | 0x20); 
+
+    // 将 P3.3 和 P3.2 配置为强推挽输出模式 
+    P3M0 |= (0x04 | 0x08); 
+    P3M1 &= ~(0x04 | 0x08); 
+}
+
+// 定时器0初始化函数（实现1ms定时）
+void Timer0_Init(void) { 
+    AUXR |= 0x80;  // 设置定时器时钟为1T模式 
+    TMOD &= 0xF0; 
+    TMOD |= 0x01;  // 设置定时器0工作在模式1（16位定时器）
+
+    // 设置定时器初值以获得大约1ms的定时周期 
+    TL0 = 0xCD; 
+    TH0 = 0xD4; 
+
+    TF0 = 0;  // 清除TF0标志 
+    TR0 = 0;  // 停止定时器0 
+    ET0 = 0;  // 关闭定时器0中断 
+    EA = 1;   // 使能总中断 
+}
+
+// 定时器0中断服务程序，合并两个代码的功能
+void Timer0_ISR() interrupt 1 { 
+    // 重新加载定时器初值以获得大约1ms的定时周期 
+    TL0 = 0xCD; 
+    TH0 = 0xD4; 
+
+    // 每次进入中断，时间计数加1 
+    timeCount++; 
+
+    switch (state) {
+        case IDLE:
+            // 在IDLE状态下不进行任何操作
+            break;
+
+        case DEBOUNCING:
+            if (timeCount >= DEBOUNCE_TIME_COUNT) {
+                // 达到30秒防抖时间，更新防抖输出并切换到IDLE状态
+                DebounceOutputPin = debounceCurrentInputLevel;
+                state = IDLE;
+                timeCount = 0;
+            }
+            break;
+
+        case TRIGGERED:
+            if (timeCount >= TIME_DURATION) {
+                // 达到1分钟定时器到期，关闭输出并切换到TIMEOUT状态
+                OutputPin = 0;
+                state = TIMEOUT;
+                TR0 = 0; // 停止定时器0
+                ET0 = 0; // 关闭定时器0中断
+                timeCount = 0;
+            }
+            break;
+
+        case TIMEOUT:
+            // 在TIMEOUT状态下不进行任何操作
+            break;
+
+        default:
+            state = IDLE;
+            break;
+    }
+}
+
+// 处理输入变化
+void ProcessInputChanges() {
+    unsigned char currentInputState = InputPin;
+    bit debounceCurrentInput = DebounceInputPin;
+
+    // 检测P5.5防抖输入引脚的变化
+    if (debounceCurrentInput != debounceCurrentInputLevel) {
+        debounceCurrentInputLevel = debounceCurrentInput;
+        debounceStartTimer = 1;
+        timeCount = 0;
+        state = DEBOUNCING;
+    }
+
+    // 检测P5.4输入引脚的上升沿触发
+    if (currentInputState == 1 && lastInputState == 0) {
+        if (state == IDLE || state == TIMEOUT) {
+            // 重置时间计数器和相关状态，并启动1分钟定时器
+            timeCount = 0;
+            OutputPin = 1; // 输出高电平
+            TR0 = 1;       // 启动定时器0
+            ET0 = 1;       // 使能定时器0中断
+            state = TRIGGERED;
+        }
+    }
+
+    // 更新上次输入状态
+    lastInputState = currentInputState;
+}
+
+void main(void) { 
+    Timer0_Init(); 
+    GPIO_Init(); 
+    OutputPin = 0; // 初始化输出脚为低电平 
+    DebounceOutputPin = 0; // 初始化防抖输出脚为低电平
+
+    lastInputState = InputPin; // 初始设置lastInputState 
+    debounceCurrentInputLevel = DebounceInputPin;
+
+    while (1) { 
+        // 主循环中处理输入变化
+        ProcessInputChanges();
+
+        // 使用延时函数避免过快轮询
+        Delay(10);
+    } 
+}
+
+// 简单延时函数 
+void Delay(unsigned int ms) { 
+    unsigned int i, j; 
+    for (i = 0; i < ms; i++) { 
+        for (j = 0; j < 1275; j++); // 这个值可以根据实际情况调整 
+    } 
+}
